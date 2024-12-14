@@ -1,0 +1,2341 @@
+From 93d62c8b334a29919c743c0c8841a209df3f7540 Mon Sep 17 00:00:00 2001
+From: tiberium <jinzhe.oerv@isrc.iscas.ac.cn>
+Date: Sat, 14 Dec 2024 15:45:27 +0000
+Subject: [PATCH 2/2] add penglai
+
+---
+ drivers/Kconfig                               |   2 +
+ drivers/Makefile                              |   1 +
+ drivers/penglai-enclave/.gitignore            |  13 +
+ drivers/penglai-enclave/Kconfig               |   5 +
+ drivers/penglai-enclave/Makefile              |  11 +
+ drivers/penglai-enclave/penglai-config.h      |  28 +
+ .../penglai-enclave/penglai-enclave-driver.c  | 125 +++
+ .../penglai-enclave/penglai-enclave-driver.h  |   6 +
+ .../penglai-enclave-elfloader.c               | 243 ++++++
+ .../penglai-enclave-elfloader.h               |  25 +
+ .../penglai-enclave/penglai-enclave-ioctl.c   | 724 ++++++++++++++++++
+ .../penglai-enclave/penglai-enclave-ioctl.h   | 110 +++
+ .../penglai-enclave/penglai-enclave-page.c    | 198 +++++
+ .../penglai-enclave/penglai-enclave-page.h    |  76 ++
+ drivers/penglai-enclave/penglai-enclave.c     | 153 ++++
+ drivers/penglai-enclave/penglai-enclave.h     | 105 +++
+ drivers/penglai-enclave/riscv64.h             |  60 ++
+ drivers/penglai-enclave/syscall.h             | 297 +++++++
+ 18 files changed, 2182 insertions(+)
+ create mode 100644 drivers/penglai-enclave/.gitignore
+ create mode 100755 drivers/penglai-enclave/Kconfig
+ create mode 100644 drivers/penglai-enclave/Makefile
+ create mode 100644 drivers/penglai-enclave/penglai-config.h
+ create mode 100644 drivers/penglai-enclave/penglai-enclave-driver.c
+ create mode 100644 drivers/penglai-enclave/penglai-enclave-driver.h
+ create mode 100644 drivers/penglai-enclave/penglai-enclave-elfloader.c
+ create mode 100644 drivers/penglai-enclave/penglai-enclave-elfloader.h
+ create mode 100644 drivers/penglai-enclave/penglai-enclave-ioctl.c
+ create mode 100644 drivers/penglai-enclave/penglai-enclave-ioctl.h
+ create mode 100644 drivers/penglai-enclave/penglai-enclave-page.c
+ create mode 100644 drivers/penglai-enclave/penglai-enclave-page.h
+ create mode 100644 drivers/penglai-enclave/penglai-enclave.c
+ create mode 100644 drivers/penglai-enclave/penglai-enclave.h
+ create mode 100644 drivers/penglai-enclave/riscv64.h
+ create mode 100644 drivers/penglai-enclave/syscall.h
+
+diff --git a/drivers/Kconfig b/drivers/Kconfig
+index 8c19d8ff4..2b853dfe3 100644
+--- a/drivers/Kconfig
++++ b/drivers/Kconfig
+@@ -240,4 +240,6 @@ source "drivers/peci/Kconfig"
+ source "drivers/hte/Kconfig"
+ 
+ source "drivers/bao/Kconfig"
++
++source "drivers/penglai-enclave"
+ endmenu
+diff --git a/drivers/Makefile b/drivers/Makefile
+index f8fa362c3..4e7d8d011 100644
+--- a/drivers/Makefile
++++ b/drivers/Makefile
+@@ -190,3 +190,4 @@ obj-$(CONFIG_MOST)		+= most/
+ obj-$(CONFIG_PECI)		+= peci/
+ obj-$(CONFIG_HTE)		+= hte/
+ obj-$(CONFIG_BAO_SHMEM)        += bao/
++obj-$(CONFIG_PENGLAI_ENCLAVE)  += penglai-enclave/
+\ No newline at end of file
+diff --git a/drivers/penglai-enclave/.gitignore b/drivers/penglai-enclave/.gitignore
+new file mode 100644
+index 000000000..4c5c78b1a
+--- /dev/null
++++ b/drivers/penglai-enclave/.gitignore
+@@ -0,0 +1,13 @@
++*.ko
++*.mod.o
++*.mod.c
++*.mod
++*.symvers
++*.order
++*.o
++.cache.mk
++*.cmd
++.tmp_versions/
++*.elf
++*.dump
++tags
+diff --git a/drivers/penglai-enclave/Kconfig b/drivers/penglai-enclave/Kconfig
+new file mode 100755
+index 000000000..7bded1551
+--- /dev/null
++++ b/drivers/penglai-enclave/Kconfig
+@@ -0,0 +1,5 @@
++config PENGLAI_ENCLAVE
++	tristate "Penglai PMP enclave support"
++
++	help
++	  This implements an interface to Penglai PMP enclave.
+diff --git a/drivers/penglai-enclave/Makefile b/drivers/penglai-enclave/Makefile
+new file mode 100644
+index 000000000..e44538ccf
+--- /dev/null
++++ b/drivers/penglai-enclave/Makefile
+@@ -0,0 +1,11 @@
++##
++## Author: Dong Du
++## Description:
++## 	The file now assumes the kernel located in ../openeuler-kernel,
++##	if you would like to use your own one, please change the path
++obj-m += penglai.o
++penglai-objs := penglai-enclave-driver.o \
++	penglai-enclave-elfloader.o \
++	penglai-enclave-page.o \
++	penglai-enclave.o \
++	penglai-enclave-ioctl.o 
+diff --git a/drivers/penglai-enclave/penglai-config.h b/drivers/penglai-enclave/penglai-config.h
+new file mode 100644
+index 000000000..dc25936dd
+--- /dev/null
++++ b/drivers/penglai-enclave/penglai-config.h
+@@ -0,0 +1,28 @@
++#ifndef _PENGLAI_CONFIG_H
++#define _PENGLAI_CONFIG_H
++
++#define NONCE 12345
++#define MD_SIZE 64
++#define MAX_ELF_SIZE 512*1024*1024
++#define MAX_STACK_SIZE 64*1024*1024
++#define DEFAULT_STACK_SIZE 1024*1024
++#define MAX_UNTRUSTED_MEM_SIZE 16*1024*1024
++#define DEFAULT_UNTRUSTED_SIZE 8*1024
++
++//TODO: 64?
++#define PRIVATE_KEY_SIZE       32
++//TODO: 32?
++#define PUBLIC_KEY_SIZE        64
++#define HASH_SIZE              32
++#define SIGNATURE_SIZE         64
++
++#define DEFAULT_CLOCK_DELAY 100000
++#define DEFAULT_UNTRUSTED_PTR   0x0000001000000000
++#define ENCLAVE_DEFAULT_KBUFFER_SIZE              0x1000UL
++#define ENCLAVE_DEFAULT_KBUFFER         0xffffffe000000000UL
++
++#define USER_PARAM_RESUME_FROM_CUSTOM_OCALL             1000
++
++#define STACK_POINT 0x0000004000000000
++#endif
++
+diff --git a/drivers/penglai-enclave/penglai-enclave-driver.c b/drivers/penglai-enclave/penglai-enclave-driver.c
+new file mode 100644
+index 000000000..07e2b012b
+--- /dev/null
++++ b/drivers/penglai-enclave/penglai-enclave-driver.c
+@@ -0,0 +1,125 @@
++#include <linux/mm.h>
++#include <linux/file.h>
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/miscdevice.h>
++#include "penglai-enclave-driver.h"
++#include "penglai-enclave-ioctl.h"
++
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("enclave_ioctl");
++MODULE_AUTHOR("LuXu");
++MODULE_VERSION("enclave_ioctl");
++
++// #define PENGLAI_DEBUG
++#ifdef PENGLAI_DEBUG
++#define dprint(...) printk(__VA_ARGS__)
++#else
++#define dprint(...)
++#endif
++
++static int enclave_mmap(struct file* f,struct vm_area_struct *vma)
++{
++	return 0;
++}
++
++static const struct file_operations enclave_ops = {
++	.owner = THIS_MODULE,
++	.mmap = enclave_mmap,
++	.unlocked_ioctl = penglai_enclave_ioctl
++};
++
++struct miscdevice enclave_dev = {
++	.minor = MISC_DYNAMIC_MINOR,
++	.name = "penglai_enclave_dev",
++	.fops = &enclave_ops,
++	.mode = 0666,
++};
++
++//static int enclave_ioctl_init(void)
++int enclave_ioctl_init(void)
++{
++	int ret;
++	unsigned long addr;
++	struct sbiret sbiret;
++	printk("enclave_ioctl_init...\n");
++
++	//register enclave_dev
++	ret=misc_register(&enclave_dev);
++	if(ret < 0)
++	{
++		printk("Enclave_driver: register enclave_dev failed!(ret:%d)\n",
++				ret);
++		goto deregister_device;
++	}
++
++	/* [Dd] Should we broadcast some states (e.g., PT_area region) to other harts? */
++	/* [LX] sm will broadcast */
++	addr = __get_free_pages(GFP_HIGHUSER, DEFAULT_SECURE_PAGES_ORDER);
++	if(!addr)
++	{
++		printk("[Penglai KModule]: can not get free page which order is 0x%x", DEFAULT_SECURE_PAGES_ORDER);
++		ret = -1;
++		goto deregister_device;
++	}
++
++#if 1
++	sbiret = SBI_CALL_2(SBI_SM_INIT, __pa(addr), 1 << (DEFAULT_SECURE_PAGES_ORDER + RISCV_PGSHIFT));
++	ret = sbiret.value;
++	//if(ret < 0)
++	if(sbiret.error)
++	{
++		printk("[Penglai KModule]: sbi call mm_init is failed\n");
++		goto deregister_device;
++	}
++#endif
++	printk("[Penglai KModule] register_chrdev succeeded!\n");
++	return 0;
++
++deregister_device:
++	misc_deregister(&enclave_dev);
++	return ret;
++}
++
++//static void enclave_ioctl_exit(void)
++void enclave_ioctl_exit(void)
++{
++	unsigned long addr, order, count;
++	unsigned long *size_ptr = kmalloc(sizeof(unsigned long), GFP_KERNEL);
++	
++	struct sbiret sbiret;
++	printk("enclave_ioctl_exit...\n");
++
++	
++	sbiret = SBI_CALL_2(SBI_SM_FREE_ENCLAVE_MEM, __pa(size_ptr), FREE_MAX_MEMORY);
++
++	addr = (unsigned long)(sbiret.value);
++	while (addr)
++	{
++		order = ilog2((*size_ptr) - 1) + 1;
++		count = 0x1 << order;
++		if (count != (*size_ptr) && (*size_ptr > 0))
++		{
++			printk("KERNEL MODULE:  the number of free pages is not exponential times of two\n");
++			kfree(size_ptr);
++			return;
++		}
++		printk("KERNEL MODULE:  free secmem:paddr:%lx, vaddr:%lx, order:%lu\n", addr, __va(addr), order);
++		if ((*size_ptr) > 0)
++		{
++			free_pages((long unsigned int)__va(addr), (order - RISCV_PGSHIFT));
++		}
++		*size_ptr = 0;
++		sbiret = SBI_CALL_2(SBI_SM_FREE_ENCLAVE_MEM, __pa(size_ptr), FREE_MAX_MEMORY);
++
++		addr = (unsigned long)(sbiret.value);
++	}
++
++deregister_device:
++	kfree(size_ptr);
++	misc_deregister(&enclave_dev);
++	return;
++}
++
++module_init(enclave_ioctl_init);
++module_exit(enclave_ioctl_exit);
+diff --git a/drivers/penglai-enclave/penglai-enclave-driver.h b/drivers/penglai-enclave/penglai-enclave-driver.h
+new file mode 100644
+index 000000000..79927486a
+--- /dev/null
++++ b/drivers/penglai-enclave/penglai-enclave-driver.h
+@@ -0,0 +1,6 @@
++#ifndef _PENGLAI_ENCLAVE_DRIVER
++#define _PENGLAI_ENCLAVE_DRIVER
++
++#define DEFAULT_SECURE_PAGES_ORDER 10
++
++#endif
+diff --git a/drivers/penglai-enclave/penglai-enclave-elfloader.c b/drivers/penglai-enclave/penglai-enclave-elfloader.c
+new file mode 100644
+index 000000000..d09e7d83a
+--- /dev/null
++++ b/drivers/penglai-enclave/penglai-enclave-elfloader.c
+@@ -0,0 +1,243 @@
++#include "penglai-enclave-elfloader.h"
++#define	ROUND_TO(x, align)  (((x) + ((align)-1)) & ~((align)-1))
++
++// Function to print hex data
++static void print_hex(const void *data, size_t size) {
++    const unsigned char *byte_data = data;
++    size_t i;
++
++    for (i = 0; i < size; ) {
++        printk("%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x", 
++		byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],
++		byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],
++		byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],
++		byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++],byte_data[i++]);
++    }
++    if (i % 16 != 0)
++        printk("\n");
++}
++
++int penglai_enclave_load_NOBITS_section(enclave_mem_t* enclave_mem, void * elf_sect_addr, int elf_sect_size)
++{
++	vaddr_t addr;
++	vaddr_t enclave_new_page;
++	int size;
++	for(addr = (vaddr_t)elf_sect_addr; addr < (vaddr_t)elf_sect_addr + elf_sect_size; addr += RISCV_PGSIZE)
++	{
++		enclave_new_page = enclave_alloc_page(enclave_mem, addr, ENCLAVE_USER_PAGE);
++		if (addr + RISCV_PGSIZE >(vaddr_t) elf_sect_addr + elf_sect_size)
++			size = elf_sect_size % RISCV_PGSIZE;
++		else
++			size = RISCV_PGSIZE;
++		memset((void *) enclave_new_page, 0, size);
++	}
++	return 0;
++}
++
++/* elf_prog_infile_addr @ content in elf file
++   elf_prog_addr @ virtual addr for program begin addr
++   elf_prog_size @ size of prog segment
++   */
++int penglai_enclave_load_program(enclave_mem_t* enclave_mem, vaddr_t elf_prog_infile_addr, void * elf_prog_addr, int elf_prog_size)
++{
++	vaddr_t addr;
++	vaddr_t enclave_new_page;
++	vaddr_t begin_page = 0;
++	int size;
++	unsigned long r = 0;
++	for(addr =  (vaddr_t)elf_prog_addr; addr <  (vaddr_t)elf_prog_addr + elf_prog_size; addr += RISCV_PGSIZE)
++	{
++
++		enclave_new_page = enclave_alloc_page(enclave_mem, addr, ENCLAVE_USER_PAGE);
++		if (addr + RISCV_PGSIZE > (vaddr_t)elf_prog_addr + elf_prog_size)
++			size = elf_prog_size % RISCV_PGSIZE;
++		else
++			size = RISCV_PGSIZE;
++		r += copy_from_user((void* )enclave_new_page, (void *)(elf_prog_infile_addr + addr - (vaddr_t)elf_prog_addr), size);
++		if (r)
++		{
++			printk("KERNEL MODULE:  load_program copy_from_user failed r=0x%lx\n",r);
++		}
++		
++		// dprint("[Penglai Driver@%s]copy segment 0x%lx to va:0x%lx -pa:0x%lx \n",__func__ ,(unsigned long)((void *)(elf_prog_addr + addr - (vaddr_t)elf_prog_addr)) ,(vaddr_t)enclave_new_page ,__pa((vaddr_t)enclave_new_page));	
++		if(!begin_page)begin_page = enclave_new_page;
++		// print_hex(enclave_new_page, size);
++	}
++	dprint("[Penglai Driver@%s] SUCCESS! from 0x%lx to 0x%lx r=0x%x\n",__func__,(unsigned long)elf_prog_addr,(unsigned long)(elf_prog_addr + elf_prog_size) ,r);
++	return 0;
++}
++
++/* ptr @ user pointer
++   hdr @ kernel pointer
++   */
++int penglai_enclave_loadelf(enclave_mem_t*enclave_mem, void* __user elf_ptr, unsigned long size, vaddr_t * elf_entry_point)
++{
++	struct  elfhdr elf_hdr;
++	struct elf_phdr elf_prog_hdr;
++	struct elf_shdr elf_sect_hdr;
++	int i,  elf_prog_size;
++	vaddr_t elf_sect_ptr, elf_prog_ptr, elf_prog_addr, elf_prog_infile_addr;
++	if(copy_from_user(&elf_hdr, elf_ptr, sizeof(struct elfhdr)) != 0)
++	{
++		printk("KERNEL MODULE:  elf_hdr copy_from_user failed\n");
++		return -1;
++	}
++
++	*elf_entry_point = elf_hdr.e_entry;
++	elf_sect_ptr = (vaddr_t) elf_ptr + elf_hdr.e_shoff;
++
++	/* Loader section */
++	for (i = 0; i < elf_hdr.e_shnum;i++)
++	{
++		if (copy_from_user(&elf_sect_hdr,(void *)elf_sect_ptr,sizeof(struct elf_shdr)))
++		{
++			printk("KERNEL MODULE: elf_sect_hdr copy_from_user failed\n");
++			elf_sect_ptr += sizeof(struct elf_shdr);
++			continue;
++		}
++		if (elf_sect_hdr.sh_addr == 0)
++		{
++			elf_sect_ptr += sizeof(struct elf_shdr);
++			continue;
++		}
++
++		/* Load NOBITS section */
++		if (elf_sect_hdr.sh_type == SHT_NOBITS)
++		{
++			vaddr_t elf_sect_addr = elf_sect_hdr.sh_addr;
++			int elf_sect_size = elf_sect_hdr.sh_size;
++			if (penglai_enclave_load_NOBITS_section(enclave_mem,(void *)elf_sect_addr,elf_sect_size) < 0)
++			{
++				printk("KERNEL MODULE: penglai enclave load NOBITS  section failed\n");
++				return -1;
++			}
++		}
++		elf_sect_ptr += sizeof(struct elf_shdr);
++	}
++
++	/* Load program segment */
++	elf_prog_ptr = (vaddr_t) elf_ptr + elf_hdr.e_phoff;
++
++	for(i = 0; i < elf_hdr.e_phnum;i++)
++	{
++		if (copy_from_user(&elf_prog_hdr,(void *)elf_prog_ptr,sizeof(struct elf_phdr)))
++		{
++			printk("KERNEL MODULE: elf_prog_hdr copy_from_user failed\n");
++			elf_prog_ptr += sizeof(struct elf_phdr);
++			continue;
++		}
++
++		/* Virtual addr for program begin address */
++		elf_prog_addr = elf_prog_hdr.p_vaddr;
++		elf_prog_size = elf_prog_hdr.p_filesz;
++		elf_prog_infile_addr = (vaddr_t) elf_ptr + elf_prog_hdr.p_offset;
++		if (penglai_enclave_load_program(enclave_mem, elf_prog_infile_addr, (void *)elf_prog_addr, elf_prog_size) < 0)
++		{
++			printk("KERNEL MODULE: penglai enclave load program failed\n");
++			return -1;
++		}
++		// printk("[Penglai Driver@%s] elf_prog_addr:0x%lx elf_prog_size:0x%x, infile_addr:0x%lx", __func__,
++				// elf_prog_addr, elf_prog_size, elf_prog_infile_addr);
++		elf_prog_ptr += sizeof(struct elf_phdr);
++	}
++	return 0;
++}
++
++int penglai_enclave_elfmemsize(void* __user elf_ptr, int* size)
++{
++	struct elfhdr elf_hdr;
++	struct elf_phdr elf_prog_hdr;
++	struct elf_shdr elf_sect_hdr;
++	int i, elf_prog_size;
++	vaddr_t elf_sect_ptr, elf_prog_ptr;
++	if(copy_from_user(&elf_hdr, elf_ptr, sizeof(struct elfhdr)) != 0)
++	{
++		printk("[Penglai Driver@%s] elf_hdr copy_from_user failed\n", __func__);
++		return -1;
++	}
++
++	elf_sect_ptr = (vaddr_t) elf_ptr + elf_hdr.e_shoff;
++
++	for (i = 0; i < elf_hdr.e_shnum;i++)
++	{
++		if (copy_from_user(&elf_sect_hdr,(void *)elf_sect_ptr,sizeof(struct elf_shdr)))
++		{
++			printk("[Penglai Driver@%s] elf_sect_hdr copy_from_user failed\n", __func__);
++			elf_sect_ptr += sizeof(struct elf_shdr);
++			return -1;
++		}
++		if (elf_sect_hdr.sh_addr == 0)
++		{
++			elf_sect_ptr += sizeof(struct elf_shdr);
++			continue;
++		}
++
++		// Calculate the size of the NOBITS section
++		if (elf_sect_hdr.sh_type == SHT_NOBITS)
++		{
++			int elf_sect_size = elf_sect_hdr.sh_size;
++			*size = *size + elf_sect_size;
++		}
++		elf_sect_ptr += sizeof(struct elf_shdr);
++	}
++
++	// Calculate the size of the PROGBITS segment
++	elf_prog_ptr = (vaddr_t) elf_ptr + elf_hdr.e_phoff;
++
++	for(i = 0; i < elf_hdr.e_phnum;i++)
++	{
++		if (copy_from_user(&elf_prog_hdr,(void *)elf_prog_ptr,sizeof(struct elf_phdr)))
++		{
++			printk("[Penglai Driver@%s] elf_prog_hdr copy_from_user failed\n", __func__);
++			elf_prog_ptr += sizeof(struct elf_phdr);
++			return -1;
++		}
++
++		// Virtual addr for program begin address
++		elf_prog_size = elf_prog_hdr.p_filesz;
++		*size = *size + elf_prog_size;
++		elf_prog_ptr += sizeof(struct elf_phdr);
++	}
++	return 0;
++}
++
++int penglai_enclave_eapp_preprare(enclave_mem_t* enclave_mem,  void* __user elf_ptr, unsigned long size, vaddr_t * elf_entry_point, vaddr_t stack_ptr, int stack_size)
++{
++	vaddr_t addr;
++
++	/* Init stack */
++	for(addr = stack_ptr - stack_size; addr < stack_ptr; addr += RISCV_PGSIZE)
++	{
++		enclave_alloc_page(enclave_mem, addr, ENCLAVE_STACK_PAGE);
++	}
++
++	/* Load elf file */
++	if(penglai_enclave_loadelf(enclave_mem, elf_ptr, size, elf_entry_point) < 0)
++	{
++		printk("KERNEL MODULE: penglai enclave loadelf failed\n");
++	}
++
++	return 0;
++}
++
++int map_untrusted_mem(enclave_mem_t* enclave_mem, vaddr_t vaddr, paddr_t paddr, unsigned long size)
++{
++	vaddr_t addr = vaddr;
++
++	for (; addr < vaddr + size; addr+=RISCV_PGSIZE) {
++		map_va2pa(enclave_mem, addr, paddr, ENCLAVE_UNTRUSTED_PAGE);
++		paddr += RISCV_PGSIZE;
++	}
++	return 0;
++}
++
++int map_kbuffer(enclave_mem_t* enclave_mem, vaddr_t vaddr, paddr_t paddr, unsigned long size)
++{
++	vaddr_t addr = vaddr;
++
++	for (; addr < vaddr + size; addr += RISCV_PGSIZE) {
++		map_va2pa(enclave_mem, addr, paddr, ENCLAVE_KBUFFER_PAGE);
++		paddr += RISCV_PGSIZE;
++	}
++	return 0;
++}
+diff --git a/drivers/penglai-enclave/penglai-enclave-elfloader.h b/drivers/penglai-enclave/penglai-enclave-elfloader.h
+new file mode 100644
+index 000000000..4c5176adb
+--- /dev/null
++++ b/drivers/penglai-enclave/penglai-enclave-elfloader.h
+@@ -0,0 +1,25 @@
++#ifndef  _PENGLAI_ENCLAVE_ELFLOADER
++#define _PENGLAI_ENCLAVE_ELFLOADER
++#include <linux/elf.h>
++#include "penglai-enclave-page.h"
++
++int penglai_enclave_eapp_preprare(
++		enclave_mem_t* enclave_mem,  
++		void* __user elf_ptr, 
++		unsigned long size, 
++		vaddr_t * elf_entry_point, 
++		vaddr_t stack_ptr, 
++		int stack_size);
++int map_untrusted_mem(
++		enclave_mem_t* enclave_mem, 
++		vaddr_t vaddr, 
++		paddr_t paddr, 
++		unsigned long size);
++int map_kbuffer(
++		enclave_mem_t* enclave_mem,
++		vaddr_t vaddr,
++		paddr_t paddr,
++		unsigned long size);
++int penglai_enclave_elfmemsize(void* __user elf_ptr, int* size);
++
++#endif
+diff --git a/drivers/penglai-enclave/penglai-enclave-ioctl.c b/drivers/penglai-enclave/penglai-enclave-ioctl.c
+new file mode 100644
+index 000000000..b30f05e53
+--- /dev/null
++++ b/drivers/penglai-enclave/penglai-enclave-ioctl.c
+@@ -0,0 +1,724 @@
++#include "penglai-enclave-ioctl.h"
++#include "syscall.h"
++
++#define PAGE_UP(addr)	(((addr)+((PAGE_SIZE)-1))&(~((PAGE_SIZE)-1)))
++
++//now we just acqure a big lock before allocating enclave mem, and release the lock
++//after initializing mem and returning it back to sm
++DEFINE_SPINLOCK(enclave_big_lock);
++
++void acquire_big_lock(const char * str)
++{
++	spin_lock(&enclave_big_lock);
++	dprint("[PENGLAI Driver@%s] %s get lock\n", __func__, str);
++}
++
++void release_big_lock(const char * str)
++{
++	spin_unlock(&enclave_big_lock);
++	dprint("[PENGLAI Driver@%s] %s release lock\n", __func__, str);
++}
++
++unsigned int total_enclave_page(int elf_size, int stack_size)
++{
++	unsigned int total_pages;
++	total_pages = PAGE_UP(elf_size) / RISCV_PGSIZE + PAGE_UP(stack_size) / RISCV_PGSIZE + 15;
++	return total_pages;
++}
++
++int create_sbi_param(enclave_t* enclave, struct penglai_enclave_sbi_param * enclave_sbi_param,
++		unsigned long paddr, unsigned long size, unsigned long entry_point,
++		unsigned long untrusted_ptr, unsigned long untrusted_ptr_paddr, unsigned long untrusted_size, unsigned long free_mem, unsigned long kbuffer_ptr, unsigned long kbuffer_paddr)
++{
++	enclave_sbi_param -> eid_ptr = (unsigned int* )__pa(&enclave -> eid);
++	enclave_sbi_param -> ecall_arg0 = (unsigned long* )__pa(&enclave -> ocall_func_id);
++	enclave_sbi_param -> ecall_arg1 = (unsigned long* )__pa(&enclave -> ocall_arg0);
++	enclave_sbi_param -> ecall_arg2 = (unsigned long* )__pa(&enclave -> ocall_arg1);
++	enclave_sbi_param -> ecall_arg3 = (unsigned long* )__pa(&enclave -> ocall_syscall_num);
++	enclave_sbi_param -> paddr = paddr;
++	enclave_sbi_param -> size = size;
++	enclave_sbi_param -> entry_point = entry_point;
++	enclave_sbi_param -> untrusted_ptr = untrusted_ptr;
++	enclave_sbi_param->untrusted_paddr = untrusted_ptr_paddr;
++	enclave_sbi_param->untrusted_size = untrusted_size;
++	enclave_sbi_param -> free_mem = free_mem;
++	//enclave share mem with kernel
++	// enclave_sbi_param->kbuffer = ENCLAVE_DEFAULT_KBUFFER;
++	enclave_sbi_param->kbuffer = kbuffer_ptr;
++	enclave_sbi_param->kbuffer_paddr = kbuffer_paddr;
++	enclave_sbi_param->kbuffer_size = enclave->kbuffer_size;
++	return 0;
++}
++
++int alloc_untrusted_mem(unsigned long untrusted_mem_size, unsigned long* untrusted_mem_ptr, enclave_t* enclave)
++{
++	int ret = 0;
++	vaddr_t addr;
++	unsigned long order = ilog2((untrusted_mem_size >> RISCV_PGSHIFT)- 1) + 1;
++
++	addr = __get_free_pages(GFP_ATOMIC, order);
++	if(!addr)
++	{
++		printk("KERNEL MODULE: can not alloc untrusted mem \n");
++		return -1;
++	}
++	memset((void*)addr, 0, untrusted_mem_size);
++
++	*untrusted_mem_ptr = addr;
++	map_untrusted_mem(enclave -> enclave_mem, DEFAULT_UNTRUSTED_PTR, __pa(addr), untrusted_mem_size);
++
++	return ret;
++}
++
++int alloc_kbuffer(unsigned long kbuffer_size, unsigned long* kbuffer_ptr, enclave_t* enclave)
++{
++	int ret = 0;
++	vaddr_t addr;
++	unsigned long order = ilog2((kbuffer_size >> RISCV_PGSHIFT) - 1) + 1;
++
++	addr = __get_free_pages(GFP_ATOMIC, order);
++	if(!addr)
++	{
++		printk("KERNEL MODULE: can not alloc kbuffer\n");
++		return -1;
++	}
++	memset((void*)addr, 0, kbuffer_size);
++
++	*kbuffer_ptr = addr;
++	map_kbuffer(enclave->enclave_mem, ENCLAVE_DEFAULT_KBUFFER, __pa(addr), kbuffer_size);
++
++	return ret;
++}
++
++int check_eapp_memory_size(long elf_size, long stack_size, long untrusted_mem_size)
++{
++	if((elf_size > MAX_ELF_SIZE) || (stack_size > MAX_STACK_SIZE) || (untrusted_mem_size > MAX_UNTRUSTED_MEM_SIZE))
++		return -1;
++	return 0;
++}
++
++int penglai_enclave_create(struct file * filep, unsigned long args)
++{
++	struct penglai_enclave_user_param* enclave_param = (struct penglai_enclave_user_param*)args;
++    void *elf_ptr = (void*)enclave_param->elf_ptr;
++	int elf_size = 0;
++	if(penglai_enclave_elfmemsize(elf_ptr, &elf_size) < 0)
++	{
++		printk("KERNEL MODULE: calculate elf_size failed\n");
++		return -1;
++	}
++	long stack_size = enclave_param->stack_size;						//DEFAULT_STACK_SIZE=1MB
++	long untrusted_mem_size = enclave_param->untrusted_mem_size;		//DEFAULT_UNTRUSTED_SIZE=8KB MAX=16MB
++	unsigned long untrusted_mem_ptr = enclave_param->untrusted_mem_ptr;	//0
++	unsigned long kbuffer_ptr = ENCLAVE_DEFAULT_KBUFFER;
++	struct penglai_enclave_sbi_param *enclave_sbi_param = kmalloc(sizeof(struct penglai_enclave_sbi_param), GFP_KERNEL);
++	enclave_t* enclave;
++	unsigned int total_pages = total_enclave_page(elf_size, stack_size);
++	unsigned long free_mem, elf_entry;
++	unsigned long order = ilog2(total_pages- 1) + 1;
++	struct sbiret ret = {0};
++
++	total_pages = 0x1 << order;
++	if(check_eapp_memory_size(elf_size, stack_size, untrusted_mem_size) < 0)
++	{
++		printk("KERNEL MODULE: eapp memory is out of bound \n");
++		return -1;
++	}
++
++	// acquire_big_lock(__func__);
++	enclave = create_enclave(total_pages);							//May sleep
++	if(!enclave)
++	{
++		printk("KERNEL MODULE: cannot create enclave\n");
++		goto destroy_enclave;
++	}
++
++	elf_entry = 0;
++	if(penglai_enclave_eapp_preprare(enclave->enclave_mem, elf_ptr, elf_size,
++				&elf_entry, STACK_POINT, stack_size))				//May sleep
++	{
++		printk("KERNEL MODULE: penglai_enclave_eapp_preprare is failed\n");;
++		goto destroy_enclave;
++	}
++	acquire_big_lock(__func__);
++	if(elf_entry == 0)
++	{
++		printk("KERNEL MODULE: elf_entry reset is failed \n");
++		goto destroy_enclave;
++	}
++
++	untrusted_mem_size = 0x1 << (ilog2(untrusted_mem_size - 1) + 1);
++	if((untrusted_mem_ptr == 0) && (untrusted_mem_size > 0))
++	{
++		alloc_untrusted_mem(untrusted_mem_size, &untrusted_mem_ptr, enclave);	//May sleep
++	}
++	enclave->untrusted_mem->addr = (vaddr_t)untrusted_mem_ptr;
++	enclave->untrusted_mem->size = untrusted_mem_size;
++	dprint("[Penglai Driver@%s] untrusted_mem->addr:0x%lx ,paddr:%lx, untrusted_mem->size:0x%lx\n",
++			__func__, (vaddr_t)untrusted_mem_ptr, __pa(untrusted_mem_ptr), untrusted_mem_size);
++
++	alloc_kbuffer(ENCLAVE_DEFAULT_KBUFFER_SIZE, &kbuffer_ptr, enclave);	//May sleep
++	enclave->kbuffer = (vaddr_t)kbuffer_ptr;
++	enclave->kbuffer_size = ENCLAVE_DEFAULT_KBUFFER_SIZE;
++
++	free_mem = get_free_mem(&(enclave->enclave_mem->free_mem));
++	create_sbi_param(enclave, enclave_sbi_param,
++					 (unsigned long)(enclave->enclave_mem->paddr),
++					 enclave->enclave_mem->size, elf_entry, DEFAULT_UNTRUSTED_PTR, __pa(untrusted_mem_ptr),
++					 untrusted_mem_size, __pa(free_mem), ENCLAVE_DEFAULT_KBUFFER, __pa(kbuffer_ptr));
++
++	dprint("[Penglai Driver@%s] enclave_mem->paddr:0x%lx, size:0x%lx\n",
++			__func__, (unsigned long)(enclave->enclave_mem->paddr),
++			enclave->enclave_mem->size);
++
++	ret = SBI_CALL_2(SBI_SM_CREATE_ENCLAVE, __pa(enclave_sbi_param), false);
++
++	//if(ret < 0)
++	if(ret.error)
++	{
++		printk("KERNEL  MODULE: SBI_SM_CREATE_ENCLAVE is failed \n");
++		if(ret.value == ENCLAVE_NO_MEMORY){
++			//TODO: allocate certain memory region like sm_init
++			unsigned long addr;
++			int retry = 5;
++			addr = __get_free_pages(GFP_ATOMIC, DEFAULT_SECURE_PAGES_ORDER);
++			if(!addr)
++			{
++				printk("KERNEL MODULE: can not get free page which order is 0x%d", DEFAULT_SECURE_PAGES_ORDER);
++				goto destroy_enclave;
++			}
++			dprint("[Penglai Driver@%s] new alloc paddr:0x%lx\n",__func__, addr);
++			ret = SBI_CALL_2(SBI_SM_MEMORY_EXTEND, __pa(addr), (1 << (DEFAULT_SECURE_PAGES_ORDER + RISCV_PGSHIFT)) );
++
++			while (ret.value == RETRY_SPIN_LOCK && retry)
++			{
++				retry--;
++				ret = SBI_CALL_2(SBI_SM_MEMORY_EXTEND, __pa(addr), (1 << (DEFAULT_SECURE_PAGES_ORDER + RISCV_PGSHIFT)));
++			}
++
++			if(ret.error)
++			{	
++				printk("KERNEL MODULE: sbi call extend memory is failed\n");
++				goto destroy_enclave;
++			}
++
++			ret = SBI_CALL_2(SBI_SM_CREATE_ENCLAVE, __pa(enclave_sbi_param), true);
++			if (ret.error)
++			{
++				printk("KERNEL MODULE: sbi call create enclave is failed\n");
++				goto destroy_enclave;
++			}
++			
++		}
++		else{
++			goto destroy_enclave;
++		} 
++	}
++
++	enclave_param->eid = enclave_idr_alloc(enclave);
++
++	enclave->is_running = 0; //clear the flag
++
++	release_big_lock(__func__);
++    kfree(enclave_sbi_param);
++	dprint("[Penglai Driver@%s] create enclave success!\t\n",__func__);
++	return ret.value;
++
++destroy_enclave:
++
++	if(enclave){
++		destroy_enclave(enclave);
++	}
++	release_big_lock(__func__);
++    if(enclave_sbi_param) kfree(enclave_sbi_param);
++
++	return -EFAULT;
++}
++
++int penglai_enclave_destroy(struct file * filep, unsigned long args)
++{
++	struct sbiret ret = {0};
++	struct penglai_enclave_user_param * enclave_param = (struct penglai_enclave_user_param*) args;
++	unsigned long eid = enclave_param ->eid;
++	enclave_t * enclave;
++	int retval = 0;
++
++	acquire_big_lock(__func__);
++	enclave = get_enclave_by_id(eid);
++
++	if (!enclave)
++		goto out;
++
++	ret = SBI_CALL_1(SBI_SM_DESTROY_ENCLAVE, enclave->eid);
++	retval = ret.value;
++	//TODO: checking ret error info
++
++	// In the case the enclave is not start running,
++	// we should directly destroy the enclave
++	if (!enclave->is_running){
++		destroy_enclave(enclave);
++		enclave_idr_remove(eid);
++	} //otherwise, the run interfaces will destroy the enclave
++
++	// ret = SBI_CALL_1(SBI_SM_FREE_ENCLAVE_MEM,);
++out:
++	release_big_lock(__func__);
++	return retval;
++}
++
++int handle_memory_extend(enclave_t * enclave)
++{
++	unsigned long pages = enclave ->ocall_arg0;
++	unsigned long order = ilog2(pages - 1) + 1;
++	unsigned long count = 0x1 << order;
++	unsigned long addr;
++	struct sbiret ret = {0};
++
++	addr = __get_free_pages(GFP_HIGHUSER,order);
++	if (!addr)
++	{
++		printk("KERNEL MODULE: can not get free pages which order is 0x%lx", order );
++		return -1;
++	}
++	ret = SBI_CALL_2(SBI_SM_MEMORY_EXTEND, __pa(addr), count << RISCV_PGSHIFT);
++
++	return ret.value;
++}
++
++int handle_memory_free(enclave_t* enclave)
++{
++	unsigned long pages = enclave ->ocall_arg0;
++	unsigned long paddr = enclave ->ocall_arg1;
++	unsigned long order = ilog2(pages - 1) + 1;
++	unsigned long count = 0x1 << order;
++
++	if(count != pages)
++		return -1;
++	free_pages((long unsigned int)__va(paddr), order << RISCV_PGSHIFT);
++
++	return 0;
++}
++
++int handle_syscall(enclave_t* enclave, unsigned long ocall_syscall_num)
++{
++	int ret =0;
++
++	switch(ocall_syscall_num)
++	{
++		case SYS_write:
++			{
++				/* FIXME */
++				char *print_data = (char*)enclave->untrusted_mem->addr;
++				print_data[511] = '\0';
++				printk(print_data);
++				//printk("");
++				break;
++			}
++
++	}
++	return ret;
++}
++
++int penglai_enclave_run(struct file *filep, unsigned long args)
++{
++	struct penglai_enclave_user_param *enclave_param = (struct penglai_enclave_user_param*) args;
++	unsigned long eid = enclave_param ->eid;
++	unsigned int enclave_eid; //this eid is not equal to eid
++	enclave_t * enclave;
++	long untrusted_mem_size = enclave_param->untrusted_mem_size;
++	long ocall_buf_size = 0;
++	unsigned long untrusted_mem_ptr = enclave_param->untrusted_mem_ptr;
++	unsigned long ocall_func_id;
++	struct sbiret ret = {0};
++	int retval = 0;
++	int resume_id = 0;
++
++	dprint("[Penglai Driver@%s] begin get_enclave_by_id\n", __func__);
++	acquire_big_lock(__func__);
++
++	enclave = get_enclave_by_id(eid);
++	if(!enclave)
++	{
++		printk("KERNEL MODULE: enclave is not exist \n");
++		retval = -EINVAL;
++		goto out;
++	}
++
++	enclave_eid = enclave->eid;
++
++	enclave->is_running = 1; //set the flag
++
++	
++
++	/* Use untrusted mem as in_out_buf*/
++	if((void*)untrusted_mem_ptr != NULL && untrusted_mem_size > 0){
++		if(untrusted_mem_size > enclave->untrusted_mem->size){
++			printk("KERNEL MODULE: untrusted memory is not big enough \n");
++			return -EINVAL;
++		}
++		memset((void*)enclave->untrusted_mem->addr, 0, enclave->untrusted_mem->size);
++		if (copy_from_user((void *)enclave->untrusted_mem->addr, (void *)untrusted_mem_ptr, untrusted_mem_size))
++		{
++			printk("KERNEL MODULE: copy_from_user failed \n");
++			return -EFAULT;
++		}
++	}
++
++	dprint("[Penglai Driver@%s] goto infinite run loop\n", __func__);
++	// In the (infinite loop), we do not need to acquire the lock
++	// The monitor is responsible to check the authentication
++	// It will only exit when either:
++	// 	1. the enclave is finished and invoke exit_enclave
++	// 	2. destroy_enclave is invoked
++	//
++	// Note: stop_enclave will not leave the loop, but will not run
++	// 	 the enclave (as resume_from_timer_irq will check status of an enclave)
++	ret = SBI_CALL_1(SBI_SM_RUN_ENCLAVE, enclave_eid);
++	resume_id = enclave->eid;
++	release_big_lock(__func__);
++
++	while((ret.value == ENCLAVE_TIMER_IRQ) || (ret.value == ENCLAVE_OCALL))
++	{
++		if (ret.value == ENCLAVE_TIMER_IRQ)
++		{
++			schedule();
++			ret = SBI_CALL_3(SBI_SM_RESUME_ENCLAVE, enclave->eid, RESUME_FROM_TIMER_IRQ, get_cycles64() + DEFAULT_CLOCK_DELAY);
++		}
++		else
++		{
++			ocall_func_id = enclave->ocall_func_id;
++			switch(ocall_func_id)
++			{
++				case OCALL_SYS_WRITE:
++				{
++					((char*)(enclave->kbuffer))[511] = '\0';
++					printk((void*)(enclave->kbuffer));
++					ret = SBI_CALL_3(SBI_SM_RESUME_ENCLAVE, resume_id, RESUME_FROM_OCALL, OCALL_SYS_WRITE);
++					break;
++				}
++				case OCALL_USER_DEFINED:
++				{
++					ocall_buf_size = enclave->ocall_arg0;
++					if((void*)untrusted_mem_ptr != NULL && ocall_buf_size > 0){
++						if(ocall_buf_size > enclave->untrusted_mem->size){
++							printk("KERNEL MODULE: untrusted memory is not big enough \n");
++							return -EINVAL;
++						}
++						if (copy_to_user((void*)untrusted_mem_ptr, (void*)enclave->untrusted_mem->addr, ocall_buf_size))
++							return -EFAULT;
++					}
++					printk("[Penglai Driver@%s] return user for ocall \n", __func__);
++					return RETURN_USER_FOR_OCALL;
++				}
++				default:
++				{
++					ret = SBI_CALL_2(SBI_SM_RESUME_ENCLAVE, resume_id, RESUME_FROM_OCALL);
++				}
++			}
++		}	
++	}
++
++	/* Use untrusted mem as in_out_buf*/
++	if((void*)untrusted_mem_ptr != NULL && untrusted_mem_size > 0){
++		if (copy_to_user((void*)untrusted_mem_ptr, (void*)enclave->untrusted_mem->addr, untrusted_mem_size))
++			return -EFAULT;
++	}
++
++	acquire_big_lock(__func__);
++	//if(ret < 0)
++	if(ret.error)
++	{
++		printk("KERNEL MODULE: sbi call run enclave is failed \n");
++		goto destroy_enclave;
++	}else{
++		printk("[Penglai Driver@%s] run returned successfully\n",
++				__func__);
++	}
++
++	//free_enclave:
++
++	destroy_enclave(enclave);
++	enclave_idr_remove(eid);
++	retval = ret.value;
++
++out:
++	release_big_lock(__func__);
++	return retval;
++
++destroy_enclave:
++	destroy_enclave(enclave);
++	enclave_idr_remove(eid);
++
++	release_big_lock(__func__);
++
++	return -EFAULT;
++}
++
++int penglai_enclave_attest(struct file * filep, unsigned long args)
++{
++	struct penglai_enclave_ioctl_attest_enclave * enclave_param = (struct penglai_enclave_ioctl_attest_enclave*) args;
++    struct report_t *report = kmalloc(sizeof(struct report_t), GFP_KERNEL);
++	unsigned long eid = enclave_param->eid;
++	enclave_t * enclave;
++	struct sbiret ret = {0};
++	int retval;
++	dprint("[Penglai Driver@%s] begin attest\n",
++				__func__);
++	acquire_big_lock(__func__);
++	enclave = get_enclave_by_id(eid);
++	if (!enclave)
++	{
++		printk("KERNEL MODULE: enclave is not exist \n");
++		retval = -EINVAL;
++		goto out;
++	}
++
++	ret = SBI_CALL_3(SBI_SM_ATTEST_ENCLAVE, enclave->eid, __pa(report), enclave_param->nonce);
++    enclave_param->report = *report;
++	retval = ret.value;
++
++out:
++	release_big_lock(__func__);
++    kfree(report);
++	return retval;
++}
++
++long penglai_enclave_stop(struct file* filep, unsigned long args)
++{
++	struct penglai_enclave_user_param * enclave_param = (struct penglai_enclave_user_param*) args;
++	unsigned long eid = enclave_param ->eid;
++	enclave_t * enclave;
++	struct sbiret ret = {0};
++	int retval;
++
++	acquire_big_lock(__func__);
++	enclave = get_enclave_by_id(eid);
++	if (!enclave)
++	{
++		printk("KERNEL MODULE: enclave is not exist \n");
++		retval = -EINVAL;
++		goto out;
++	}
++	ret = SBI_CALL_1(SBI_SM_STOP_ENCLAVE, enclave->eid);
++	if (ret.error)
++	{
++		printk("KERNEL MODULE: sbi call stop enclave is failed \n");
++		//goto destroy_enclave;
++	}
++	retval = ret.value;
++
++out:
++	release_big_lock(__func__);
++	return retval;
++
++#if 0
++	//destroy_enclave:
++	destroy_enclave(enclave);
++	enclave_idr_remove(eid);
++	return -EFAULT;
++#endif
++}
++
++int penglai_enclave_resume(struct file * filep, unsigned long args)
++{
++	struct penglai_enclave_user_param * enclave_param = (struct penglai_enclave_user_param*) args;
++	unsigned long eid = enclave_param ->eid;
++	enclave_t * enclave;
++	long untrusted_mem_size = enclave_param->untrusted_mem_size;
++	long ocall_buf_size = enclave_param->ocall_buf_size;
++	unsigned long untrusted_mem_ptr = enclave_param->untrusted_mem_ptr;
++	unsigned long ocall_func_id;
++	struct sbiret ret = {0};
++	int retval;
++	int resume_id = 0;
++
++	acquire_big_lock(__func__);
++	enclave = get_enclave_by_id(eid);
++	if (!enclave)
++	{
++		printk("KERNEL MODULE: enclave is not exist \n");
++		retval = -EINVAL;
++		goto out;
++	}
++
++	switch(enclave_param->resume_type){
++		case USER_PARAM_RESUME_FROM_CUSTOM_OCALL:
++		{
++			// In the (infinite loop), we do not need to acquire the lock
++			// Situation is like when we handle penglai_enclave_run()
++			release_big_lock(__func__);
++
++			/* Use untrusted mem as in_out_buf*/
++			if((void*)untrusted_mem_ptr != NULL && ocall_buf_size > 0){
++				if(ocall_buf_size > enclave->untrusted_mem->size){
++					printk("KERNEL MODULE: untrusted memory is not big enough \n");
++					return -EINVAL;
++				}
++				memset((void*)enclave->untrusted_mem->addr, 0, enclave->untrusted_mem->size);
++				if(copy_from_user((void*)enclave->untrusted_mem->addr, (void*)untrusted_mem_ptr, ocall_buf_size)){
++					retval = -EFAULT;
++					return -EFAULT;
++				}
++			}
++			ret = SBI_CALL_3(SBI_SM_RESUME_ENCLAVE, enclave->eid, RESUME_FROM_OCALL, OCALL_USER_DEFINED);
++			resume_id = enclave->eid;
++
++			while((ret.value == ENCLAVE_TIMER_IRQ) || (ret.value == ENCLAVE_OCALL))
++			{
++				if (ret.value == ENCLAVE_TIMER_IRQ)
++				{
++					schedule();
++					ret = SBI_CALL_3(SBI_SM_RESUME_ENCLAVE, enclave->eid, RESUME_FROM_TIMER_IRQ, get_cycles64() + DEFAULT_CLOCK_DELAY);
++				}
++				else
++				{
++					ocall_func_id = enclave->ocall_func_id;
++					switch(ocall_func_id)
++					{
++						case OCALL_SYS_WRITE:
++						{
++							((char*)(enclave->kbuffer))[511] = '\0';
++							printk((void*)(enclave->kbuffer));
++							ret = SBI_CALL_3(SBI_SM_RESUME_ENCLAVE, resume_id, RESUME_FROM_OCALL, OCALL_SYS_WRITE);
++							break;
++						}
++						case OCALL_USER_DEFINED:
++						{
++							ocall_buf_size = enclave->ocall_arg0;
++							if((void*)untrusted_mem_ptr != NULL && ocall_buf_size > 0){
++								if(ocall_buf_size > enclave->untrusted_mem->size){
++									printk("KERNEL MODULE: untrusted memory is not big enough \n");
++									return -EINVAL;
++								}
++								if (copy_to_user((void*)untrusted_mem_ptr, (void*)enclave->untrusted_mem->addr, ocall_buf_size))
++									return -EFAULT;
++							}
++							dprint("[Penglai Driver@%s] return user for ocall,enclave->untrusted_mem:%lx\n\t kbuffer:%lx kbuffer_val:%s \n", __func__, (void *)(enclave->untrusted_mem->addr), enclave->kbuffer, (void *)(enclave->kbuffer));
++							return RETURN_USER_FOR_OCALL;
++						}
++						default:
++						{
++							ret = SBI_CALL_2(SBI_SM_RESUME_ENCLAVE, resume_id, RESUME_FROM_OCALL);
++						}
++					}
++				}
++			}
++			/* Use untrusted mem as in_out_buf*/
++			if((void*)untrusted_mem_ptr != NULL && untrusted_mem_size > 0){
++				if (copy_to_user((void*)untrusted_mem_ptr, (void*)enclave->untrusted_mem->addr, untrusted_mem_size))
++					return -EFAULT;
++			}
++
++			acquire_big_lock(__func__);
++			if(ret.error)
++			{
++				printk("KERNEL MODULE: sbi call run enclave is failed \n");
++				retval = -EFAULT;
++			}else{
++				// Make its return look like penglai_enclave_run() return
++				printk("[Penglai Driver@%s] run returned successfully\n", __func__);
++				retval = ret.value;
++			}
++			//free_enclave:
++			destroy_enclave(enclave);
++			enclave_idr_remove(eid);
++			break;
++		}
++		default:
++		{
++			ret = SBI_CALL_2(SBI_SM_RESUME_ENCLAVE, enclave->eid, RESUME_FROM_STOP);
++			if (ret.error)
++			{
++				printk("KERNEL MODULE: sbi call resume enclave is failed \n");
++			}
++			retval = ret.value;
++			break;
++		}
++	}
++
++out:
++	release_big_lock(__func__);
++	return retval;
++}
++
++int penglai_enclave_memory_reclaim(struct file * filep, unsigned long args){
++	int retval;
++	struct sbiret ret = {0};
++	struct mm_reclaim_arg_t* mm_reclaim;
++
++	struct penglai_enclave_user_param * enclave_param = (struct penglai_enclave_user_param*) args;
++	unsigned long eid = enclave_param ->eid;
++	enclave_t * enclave;
++
++	enclave = get_enclave_by_id(eid);
++
++	mm_reclaim = kmalloc(sizeof(struct mm_reclaim_arg_t), GFP_KERNEL);
++
++	acquire_big_lock(__func__);
++	ret = SBI_CALL_2(SBI_SM_MEMORY_RECLAIM, __pa(mm_reclaim), enclave->eid);
++	retval = ret.value;
++	
++	release_big_lock(__func__);
++
++	dprint("[Penglai Driver@%s]A total of %lx enclave memory was reclaimed\n",__func__, mm_reclaim->resp_size);
++	kfree(mm_reclaim);
++	return retval;
++}
++
++long penglai_enclave_ioctl(struct file* filep, unsigned int cmd, unsigned long args)
++{
++	char ioctl_data[1024];
++	int ioc_size, ret;
++	struct sbiret sbiret;
++
++	ioc_size = _IOC_SIZE(cmd);
++	if (ioc_size > sizeof(ioctl_data))
++	{
++		printk("KERNEL MODULE : ioc_data buff is not enough\n");
++		return -EFAULT;
++	}
++
++	if(copy_from_user(ioctl_data, (void*)args, ioc_size))
++	{
++		printk("KERNEL MODULE : copy from the user is failed\n");
++		return -EFAULT;
++	}
++
++	switch(cmd)
++	{
++		case PENGLAI_ENCLAVE_IOC_CREATE_ENCLAVE:
++			ret = penglai_enclave_create(filep, (unsigned long)ioctl_data);
++			break;
++		case PENGLAI_ENCLAVE_IOC_RUN_ENCLAVE:
++			ret = penglai_enclave_run(filep, (unsigned long)ioctl_data);
++			break;
++		case PENGLAI_ENCLAVE_IOC_ATTEST_ENCLAVE:
++			ret = penglai_enclave_attest(filep, (unsigned long)ioctl_data);
++			break;
++		case PENGLAI_ENCLAVE_IOC_STOP_ENCLAVE:
++			ret = penglai_enclave_stop(filep, (unsigned long)ioctl_data);
++			break;
++		case PENGLAI_ENCLAVE_IOC_RESUME_ENCLAVE:
++			ret = penglai_enclave_resume(filep, (unsigned long)ioctl_data);
++			break;
++		case PENGLAI_ENCLAVE_IOC_DESTROY_ENCLAVE:
++			ret = penglai_enclave_destroy(filep, (unsigned long)ioctl_data);
++			break;
++		case PENGLAI_ENCLAVE_MEMORY_RECLAIM:
++			ret = penglai_enclave_memory_reclaim(filep, (unsigned long)ioctl_data);
++			break;
++		case PENGLAI_ENCLAVE_IOC_DEBUG_PRINT:
++			sbiret = SBI_CALL_1(SBI_SM_DEBUG_PRINT, 0);
++			ret = sbiret.value;
++			break;
++		default:
++			return -EFAULT;
++	}
++
++	if (copy_to_user((void*)args, ioctl_data, ioc_size))
++	{
++		printk("KERNEL MODULE: ioc_data buff is not enough\n");
++		return -EFAULT;
++	}
++	return ret;
++}
+diff --git a/drivers/penglai-enclave/penglai-enclave-ioctl.h b/drivers/penglai-enclave/penglai-enclave-ioctl.h
+new file mode 100644
+index 000000000..c6cadb04c
+--- /dev/null
++++ b/drivers/penglai-enclave/penglai-enclave-ioctl.h
+@@ -0,0 +1,110 @@
++#ifndef  _PENGLAI_ENCLAVE_IOCTL
++#define _PENGLAI_ENCLAVE_IOCTL
++#include "penglai-enclave.h"
++#include "penglai-config.h"
++#include <linux/uaccess.h>
++#include <linux/types.h>
++#include <asm/timex.h>
++#include <linux/types.h>
++
++#define PENGLAI_ENCLAVE_IOC_CREATE_ENCLAVE \
++	_IOR(PENGLAI_ENCLAVE_IOC_MAGIC, 0x00, struct penglai_enclave_user_param)
++#define PENGLAI_ENCLAVE_IOC_RUN_ENCLAVE \
++	_IOR(PENGLAI_ENCLAVE_IOC_MAGIC, 0x01, struct penglai_enclave_user_param)
++#define PENGLAI_ENCLAVE_IOC_ATTEST_ENCLAVE \
++	_IOR(PENGLAI_ENCLAVE_IOC_MAGIC, 0x02, struct penglai_enclave_ioctl_attest_enclave)
++#define PENGLAI_ENCLAVE_IOC_STOP_ENCLAVE \
++	_IOR(PENGLAI_ENCLAVE_IOC_MAGIC, 0x03, struct penglai_enclave_user_param)
++#define PENGLAI_ENCLAVE_IOC_RESUME_ENCLAVE \
++	_IOR(PENGLAI_ENCLAVE_IOC_MAGIC, 0x04, struct penglai_enclave_user_param)
++#define PENGLAI_ENCLAVE_IOC_DESTROY_ENCLAVE \
++	_IOW(PENGLAI_ENCLAVE_IOC_MAGIC, 0x05, struct penglai_enclave_user_param)
++#define PENGLAI_ENCLAVE_IOC_DEBUG_PRINT \
++	_IOW(PENGLAI_ENCLAVE_IOC_MAGIC, 0x06, struct penglai_enclave_user_param)
++#define PENGLAI_ENCLAVE_MEMORY_RECLAIM \
++  _IOW(PENGLAI_ENCLAVE_IOC_MAGIC, 0x07, struct penglai_enclave_user_param)
++
++#define DEFAULT_SECURE_PAGES_ORDER 10
++#define DEFAULT_CLOCK_DELAY 100000
++
++#define USER_PARAM_RESUME_FROM_CUSTOM_OCALL		1000
++
++struct penglai_enclave_user_param
++{
++	unsigned long eid;
++	unsigned long elf_ptr;
++	long elf_size;
++	long stack_size;
++	unsigned long untrusted_mem_ptr;
++	long untrusted_mem_size;
++	long ocall_buf_size;
++	int resume_type;
++};
++
++struct penglai_enclave_sbi_param
++{
++	unsigned int * eid_ptr;
++	unsigned long paddr;
++	unsigned long size;
++	unsigned long entry_point;
++	unsigned long untrusted_ptr;
++	unsigned long untrusted_paddr;
++	unsigned long untrusted_size;
++	unsigned long free_mem;
++	//enclave shared mem with kernel
++	unsigned long kbuffer;
++	unsigned long kbuffer_paddr;
++	unsigned long kbuffer_size;
++	unsigned long *ecall_arg0;
++	unsigned long *ecall_arg1;
++	unsigned long *ecall_arg2;
++	unsigned long *ecall_arg3;
++
++};
++
++typedef unsigned char byte;
++
++struct sm_report_t
++{
++  unsigned char hash[HASH_SIZE];
++  unsigned char signature[SIGNATURE_SIZE];
++  unsigned char sm_pub_key[PUBLIC_KEY_SIZE];
++};
++
++struct enclave_report_t
++{
++  unsigned char hash[HASH_SIZE];
++  unsigned char signature[SIGNATURE_SIZE];
++  uintptr_t nonce;
++};
++
++struct report_t
++{
++  struct sm_report_t sm;
++  struct enclave_report_t enclave;
++  unsigned char dev_pub_key[PUBLIC_KEY_SIZE];
++};
++
++struct signature_t
++{
++  unsigned char r[PUBLIC_KEY_SIZE/2];
++  unsigned char s[PUBLIC_KEY_SIZE/2];
++};
++
++struct penglai_enclave_ioctl_attest_enclave
++{
++	unsigned long eid;
++	unsigned long nonce;
++	struct report_t report;
++};
++
++struct mm_reclaim_arg_t
++{
++  unsigned long req_size;
++  unsigned long req_addr;
++  unsigned long resp_size;
++};
++
++long penglai_enclave_ioctl(struct file* filep, unsigned int cmd, unsigned long args);
++
++#endif
+diff --git a/drivers/penglai-enclave/penglai-enclave-page.c b/drivers/penglai-enclave/penglai-enclave-page.c
+new file mode 100644
+index 000000000..e3fc23d69
+--- /dev/null
++++ b/drivers/penglai-enclave/penglai-enclave-page.c
+@@ -0,0 +1,198 @@
++#include "penglai-enclave-page.h"
++
++vaddr_t get_free_mem(struct list_head* free_mem)
++{
++	struct free_mem_t* page;
++	vaddr_t vaddr;
++
++	if(list_empty(free_mem))
++	{
++		printk("KERNEL MODULE: get_free_mem: No empty mem in enclave\n");
++		return 0;
++	}
++
++	page = list_first_entry(free_mem, struct free_mem_t, free_mem_list);
++	vaddr = page->vaddr;
++	list_del(&page->free_mem_list);
++	/* Free the free_mem_t struct */
++	kfree(page);
++
++	return vaddr;
++}
++
++static void put_free_page(struct list_head* free_mem, vaddr_t vaddr)
++{
++	struct free_mem_t* page = kmalloc(sizeof(struct free_mem_t),GFP_KERNEL);
++	page->vaddr = vaddr;
++	list_add_tail(&page->free_mem_list, free_mem);
++
++	return;
++}
++
++void init_free_mem( struct list_head* free_mem, vaddr_t base, unsigned int count)
++{
++	vaddr_t cur;
++	int i ;
++	cur = base;
++	for(i=0; i<count; i++)
++	{
++		put_free_page(free_mem, cur);
++		cur += RISCV_PGSIZE;
++	}
++
++	return;
++}
++
++int clean_free_mem(struct list_head * free_mem)
++{
++	struct free_mem_t* page;
++	while(!list_empty(free_mem))
++	{
++		page = list_first_entry(free_mem, struct free_mem_t, free_mem_list);
++		list_del(&page->free_mem_list);
++		/* Free the free_mem_t struct */
++		kfree(page);
++	}
++
++	return 0;
++}
++
++static inline pt_entry_t pte_create(unsigned long ppn, int type)
++{
++	return (ppn << PTE_PPN_SHIFT) | PTE_V | type ;
++}
++
++static inline pt_entry_t ptd_create(unsigned long ppn)
++{
++	return pte_create(ppn, PTE_V);
++}
++
++static inline paddr_t pte2pa(pt_entry_t pte)
++{
++	return (pte >> RISCV_PTE_PERMBITS) << RISCV_PT_SHIFT;
++}
++
++static inline vaddr_t pte2va(pt_entry_t pte)
++{
++	return (vaddr_t)__va(pte2pa(pte));
++}
++
++static inline paddr_t va2ppn(vaddr_t vaddr)
++{
++	return __pa(vaddr) >> RISCV_PGSHIFT;
++}
++
++static inline paddr_t pa2ppn(paddr_t vaddr)
++{
++	return vaddr >> RISCV_PGSHIFT;
++}
++
++static inline int get_pt_index(vaddr_t vaddr, int level)
++{
++	int index = vaddr >> (VA_BITS - (level + 1)*RISCV_PGLEVEL_BITS);
++
++	return index & ((1 << RISCV_PGLEVEL_BITS) - 1) ;
++}
++
++static  inline int create_ptd_page(struct list_head* free_mem,pt_entry_t * pte)
++{
++	vaddr_t addr = get_free_mem(free_mem);
++	paddr_t addr_ppn;
++	if(addr == 0)
++		return -1;
++	addr_ppn = va2ppn(addr);
++	*pte = ptd_create(addr_ppn);
++
++	return 0;
++}
++
++static pt_entry_t * walk_enclave_pt(struct list_head* free_mem, pt_entry_t* enclave_root_pt, vaddr_t vaddr, bool create)
++{
++	pt_entry_t* pgdir = enclave_root_pt;
++	int i;
++
++	for(i = 0; i < RISCV_PT_LEVEL-1 ; i++)
++	{
++		int pt_index = get_pt_index(vaddr, i);
++		pt_entry_t pt_entry = pgdir[pt_index];
++		if(unlikely(!(pt_entry & PTE_V)))
++		{
++			if(create)
++			{
++				if(create_ptd_page(free_mem, &pgdir[pt_index]) < 0)
++					return NULL;
++				else
++					pt_entry = pgdir[pt_index];
++			}
++			else
++				printk("KERNEL MODULE: walk_enclave_pt fault\n");
++		}
++		pgdir = (pt_entry_t*)pte2va(pt_entry);
++	}
++
++	return &pgdir[get_pt_index(vaddr, RISCV_PT_LEVEL-1)];
++}
++
++static inline pt_entry_t* clear_enclave_pt(pt_entry_t * enclave_root_pt, vaddr_t vaddr)
++{
++	pt_entry_t * pgdir = enclave_root_pt;
++	int i;
++	for (i = 0; i < RISCV_PT_LEVEL -1 ; i++)
++	{
++		int pt_index = get_pt_index(vaddr , i);
++		pt_entry_t pt_entry = pgdir[pt_index];
++		if(unlikely(!(pt_entry & PTE_V)))
++		{
++			return 0;
++		}
++		pgdir = (pt_entry_t *)pte2va(pt_entry);
++	}
++	pgdir[get_pt_index(vaddr , RISCV_PT_LEVEL - 1)] = 0;
++
++	return &pgdir[get_pt_index(vaddr , RISCV_PT_LEVEL - 1)];
++}
++
++vaddr_t enclave_alloc_page(enclave_mem_t*enclave_mem, vaddr_t vaddr, unsigned long flags)
++{
++	vaddr_t free_page = get_free_mem(&enclave_mem->free_mem);
++	pt_entry_t *pte = walk_enclave_pt(&enclave_mem->free_mem, enclave_mem -> enclave_root_pt, vaddr, true);
++	unsigned long ppn = va2ppn((vaddr_t)free_page);
++	*pte = ptd_create(ppn) | flags | PTE_V;
++
++	return free_page;
++}
++
++vaddr_t map_va2pa(enclave_mem_t* enclave_mem, vaddr_t vaddr, paddr_t paddr, unsigned long flags)
++{
++	pt_entry_t *pte = walk_enclave_pt(&enclave_mem->free_mem, enclave_mem -> enclave_root_pt, vaddr, true);
++	unsigned long ppn = pa2ppn(paddr);
++	*pte = ptd_create(ppn) | flags | PTE_V;
++	return vaddr;
++}
++
++void enclave_mem_int(enclave_mem_t* enclave_mem, vaddr_t vaddr, int size, paddr_t paddr)
++{
++	pt_entry_t *pte;
++	init_free_mem(&enclave_mem->free_mem, vaddr, size / RISCV_PGSIZE);
++	enclave_mem -> vaddr = vaddr;
++	enclave_mem -> paddr = paddr;
++	enclave_mem -> size = size;
++	pte = (pt_entry_t *)get_free_mem(&enclave_mem->free_mem);
++	enclave_mem -> enclave_root_pt = pte;
++	/*
++FIXME: create two special pages in enclave(the record for dynamic allocation pages)
++*/
++	get_free_mem(&enclave_mem->free_mem);
++}
++
++int enclave_mem_destroy(enclave_mem_t * enclave_mem)
++{
++	clean_free_mem(&enclave_mem -> free_mem);
++	/*
++FIXME: clear two special pages in enclave(the record for dynamic allocation pages)
++Need to reclaim enclave mem to kernel ?
++free_pages(enclave->addr, enclave->size)
++free_pages(enclave dynamic alloc pages, size)
++*/
++	return 0;
++}
+diff --git a/drivers/penglai-enclave/penglai-enclave-page.h b/drivers/penglai-enclave/penglai-enclave-page.h
+new file mode 100644
+index 000000000..1c3052d4e
+--- /dev/null
++++ b/drivers/penglai-enclave/penglai-enclave-page.h
+@@ -0,0 +1,76 @@
++#ifndef  _PENGLAI_ENCLAVE_PAGE
++#define _PENGLAI_ENCLAVE_PAGE
++
++#include <asm/sbi.h>
++#include <asm/csr.h>
++#include <linux/slab.h>
++#include <linux/module.h>
++#include <linux/uaccess.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/fs.h>
++#include <linux/miscdevice.h>
++#include <linux/idr.h>
++#include <linux/dma-mapping.h>
++#include <linux/list.h>
++
++#include <linux/file.h>
++#include "riscv64.h"
++
++typedef uintptr_t vaddr_t;
++typedef uintptr_t paddr_t;
++typedef unsigned long pt_entry_t;
++
++// #define PENGLAI_DEBUG
++#ifdef PENGLAI_DEBUG
++#define dprint(...) printk(__VA_ARGS__)
++#else
++#define dprint(...)
++#endif
++
++#define RISCV_PT_SHIFT 12
++#define RISCV_PT_LEVEL 3
++#define RISCV_PT_LEVELBITS 9
++#define RISCV_PTE_PERMBITS 10
++#define RISCV_PT_SIZE (1 << RISCV_PT_SHIFT)
++#define ENCLAVE_USER_PAGE PTE_D | PTE_A | PTE_R | PTE_X | PTE_W | PTE_U
++#define ENCLAVE_STACK_PAGE PTE_D | PTE_A | PTE_R | PTE_W | PTE_U
++#define ENCLAVE_UNTRUSTED_PAGE PTE_D | PTE_A | PTE_R | PTE_W | PTE_U
++#define ENCLAVE_KBUFFER_PAGE PTE_D | PTE_A | PTE_R | PTE_W | PTE_U
++
++/* Abstract for enclave memory (secure memory) */
++struct enclave_mem
++{
++	pt_entry_t* enclave_root_pt;
++	struct list_head free_mem;
++	unsigned long size;
++	vaddr_t vaddr;
++	paddr_t paddr;
++};
++
++typedef struct enclave_mem enclave_mem_t;
++
++struct untrusted_mem
++{
++	vaddr_t addr;
++	long size;
++};
++
++typedef struct untrusted_mem untrusted_mem_t;
++
++/* Free memory list in-enclave */
++struct free_mem_t 
++{
++	vaddr_t vaddr;
++	struct list_head  free_mem_list;
++};
++
++vaddr_t enclave_alloc_page(enclave_mem_t* enclave_mem, vaddr_t vaddr, unsigned long flags);
++void enclave_mem_int(enclave_mem_t* enclave_mem, vaddr_t vaddr, int size, paddr_t paddr);
++vaddr_t get_free_mem(struct list_head* free_mem);
++int enclave_mem_destroy(enclave_mem_t * enclave_mem);
++vaddr_t map_va2pa(enclave_mem_t* enclave_mem, vaddr_t vaddr, paddr_t paddr, unsigned long flags);
++
++
++#endif
+diff --git a/drivers/penglai-enclave/penglai-enclave.c b/drivers/penglai-enclave/penglai-enclave.c
+new file mode 100644
+index 000000000..7e4492efa
+--- /dev/null
++++ b/drivers/penglai-enclave/penglai-enclave.c
+@@ -0,0 +1,153 @@
++#include "penglai-enclave.h"
++DEFINE_IDR(idr_enclave);
++DEFINE_SPINLOCK(idr_enclave_lock);
++DEFINE_SPINLOCK(kmalloc_enclave_lock);
++/*
++ * ACK (DD): the idr_alloc function is learned from keystone :)
++ * */
++unsigned int enclave_idr_alloc(enclave_t* enclave)
++{
++	unsigned int ueid;
++
++	spin_lock_bh(&idr_enclave_lock);
++	ueid = idr_alloc(&idr_enclave, enclave, ENCLAVE_IDR_MIN, ENCLAVE_IDR_MAX, GFP_ATOMIC);
++	spin_unlock_bh(&idr_enclave_lock);
++
++	if (ueid < ENCLAVE_IDR_MIN || ueid >= ENCLAVE_IDR_MAX) {
++		printk("KERNEL MODULE: failed to allocate UID\n");
++		return 0;
++	}
++
++	return ueid;
++}
++
++enclave_t* enclave_idr_remove(unsigned int ueid)
++{
++	enclave_t* enclave;
++
++	spin_lock_bh(&idr_enclave_lock);
++	enclave = idr_remove(&idr_enclave, ueid);
++	spin_unlock_bh(&idr_enclave_lock);
++
++	return enclave;
++}
++
++enclave_t* get_enclave_by_id(unsigned int ueid)
++{
++	enclave_t* enclave;
++
++	spin_lock_bh(&idr_enclave_lock);
++	enclave = idr_find(&idr_enclave, ueid);
++	spin_unlock_bh(&idr_enclave_lock);
++
++	return enclave;
++}
++
++enclave_t* create_enclave(int total_pages)
++{
++	vaddr_t addr = 0;
++	paddr_t pa = 0;
++	enclave_t* enclave = kmalloc(sizeof(enclave_t), GFP_ATOMIC);
++	enclave_mem_t* enclave_mem = kmalloc(sizeof(enclave_mem_t), GFP_ATOMIC);
++	untrusted_mem_t* untrusted_mem = kmalloc(sizeof(untrusted_mem_t), GFP_ATOMIC);
++	require_sec_memory_t* require_sec_memory = kmalloc(sizeof(require_sec_memory_t), GFP_ATOMIC);
++	spin_lock_bh(&kmalloc_enclave_lock);
++	int size;
++	struct sbiret ret;
++	unsigned long order = ilog2(total_pages-1) + 1;
++
++	if(!enclave || !enclave_mem || !untrusted_mem)
++	{
++		printk("KERNEL MODULE: no enough kernel memory\n");
++		goto free_enclave;
++	}
++
++	dprint("[Penglai Driver@%s] total_pages:%d order:%ld\n",
++			__func__, total_pages, order);
++	//Note: SBI_SM_ALLOC_ENCLAVE_MEM's arg is the num of bytes instead of pages
++	require_sec_memory->size = total_pages << RISCV_PGSHIFT;//0x200000
++    dprint("[Penglai Driver@%s] require_sec_memory va: %lx, pa: %lx, __va(pa): %lx, size:%lx\n",
++			__func__, (unsigned long)require_sec_memory, __pa(require_sec_memory), (unsigned long)__va(__pa(require_sec_memory)),(unsigned long)require_sec_memory->size);
++
++	ret = SBI_CALL_1(SBI_SM_ALLOC_ENCLAVE_MEM, __pa(require_sec_memory));
++	pa = require_sec_memory->paddr;
++
++	if (ret.error){
++		printk("[Penglai SDK Driver Error@%s] alloc_enclave_mem error\n", __func__);
++	}
++	while(ret.value == ENCLAVE_NO_MEMORY)
++	{
++		//TODO: allocate certain memory region like sm_init instead of allocating size of one enclave
++		addr = __get_free_pages(GFP_ATOMIC, order);
++		if(!addr)
++		{
++			printk("KERNEL MODULE: can not get free page which order is 0x%lx", order);
++			goto free_enclave;
++		}
++
++		ret = SBI_CALL_2(SBI_SM_MEMORY_EXTEND, __pa(addr), (1 << (order+RISCV_PGSHIFT)) );
++		if(ret.error)
++		{
++			printk("KERNEL MODULE: sbi call extend memory is failed\n");
++			goto free_enclave;
++		}
++
++		//FIXME: use physical address
++		//ret = SBI_CALL_1(SBI_SM_ALLOC_ENCLAVE_MEM, require_sec_memory);
++		ret = SBI_CALL_1(SBI_SM_ALLOC_ENCLAVE_MEM, __pa(require_sec_memory));
++		pa = require_sec_memory->paddr;
++	}
++
++	//if(ret < 0 && ret != ENCLAVE_NO_MEMORY)
++	if(ret.value!=0 && ret.value != ENCLAVE_NO_MEMORY)
++	{
++		printk("KERNEL MODULE: [SBI_CALL]alloc enclave mem failed\n");
++		goto free_enclave;
++	}
++
++	addr = (vaddr_t)__va(pa);
++	size = require_sec_memory->resp_size;
++	INIT_LIST_HEAD(&enclave_mem->free_mem);
++	spin_unlock_bh(&kmalloc_enclave_lock);
++	enclave_mem_int(enclave_mem, addr, size, __pa(addr));
++	spin_lock_bh(&kmalloc_enclave_lock);
++
++	enclave->enclave_mem = enclave_mem;
++	enclave->untrusted_mem = untrusted_mem;
++
++    kfree(require_sec_memory);
++	spin_unlock_bh(&kmalloc_enclave_lock);
++	//TODO: create untrusted mem
++
++	return enclave;
++
++free_enclave:
++
++	if(enclave) kfree(enclave);
++	if(enclave_mem) kfree(enclave_mem);
++	if(untrusted_mem) kfree(untrusted_mem);
++    if(require_sec_memory) kfree(require_sec_memory);
++	spin_unlock_bh(&kmalloc_enclave_lock);
++	return NULL;
++}
++
++/*
++ * This function should be called with enclave_big_lock acquired
++ * */
++int destroy_enclave(enclave_t* enclave)
++{
++	enclave_mem_t* enclave_mem;
++	untrusted_mem_t* untrusted_mem;
++
++	if(!enclave)
++		return -1;
++
++	enclave_mem = enclave->enclave_mem;
++	untrusted_mem = enclave->untrusted_mem;
++	enclave_mem_destroy(enclave_mem);
++	if(enclave_mem)kfree(enclave_mem);
++	if(untrusted_mem)kfree(untrusted_mem);
++	kfree(enclave);
++
++	return 0;
++}
+diff --git a/drivers/penglai-enclave/penglai-enclave.h b/drivers/penglai-enclave/penglai-enclave.h
+new file mode 100644
+index 000000000..2415638e3
+--- /dev/null
++++ b/drivers/penglai-enclave/penglai-enclave.h
+@@ -0,0 +1,105 @@
++#ifndef _PENGLAI_ENCLAVE
++#define _PENGLAI_ENCLAVE
++#include "penglai-enclave-page.h"
++#include "penglai-enclave-elfloader.h"
++#include <asm/sbi.h>
++
++#define SBI_EXT_PENGLAI_HOST            0x100100
++
++//define SBI_CALL here
++#define SBI_CALL_1(func_id, arg1) 		sbi_ecall(SBI_EXT_PENGLAI_HOST, func_id, arg1, 0   , 0   ,0,0,0)
++#define SBI_CALL_2(func_id, arg1, arg2) 	sbi_ecall(SBI_EXT_PENGLAI_HOST, func_id, arg1, arg2, 0   ,0,0,0)
++#define SBI_CALL_3(func_id, arg1, arg2, arg3)	sbi_ecall(SBI_EXT_PENGLAI_HOST, func_id, arg1, arg2, arg3,0,0,0)
++
++#define ENCLAVE_IDR_MIN 0x1000
++#define ENCLAVE_IDR_MAX 0xffff
++
++#define EXTRA_PAGES 15
++#define STACK_POINT 0x0000004000000000
++#define PENGLAI_ENCLAVE_IOC_MAGIC  0xa4
++
++//SBI CALL NUMBERS
++#define SBI_SM_INIT                     100
++#define SBI_SM_CREATE_ENCLAVE            99
++#define SBI_SM_ATTEST_ENCLAVE            98
++#define SBI_SM_RUN_ENCLAVE               97
++#define SBI_SM_STOP_ENCLAVE              96
++#define SBI_SM_RESUME_ENCLAVE            95
++#define SBI_SM_DESTROY_ENCLAVE           94
++#define SBI_SM_ALLOC_ENCLAVE_MEM         93
++#define SBI_SM_MEMORY_EXTEND             92
++#define SBI_SM_MEMORY_RECLAIM			 91
++#define SBI_SM_FREE_ENCLAVE_MEM          90
++#define SBI_SM_DEBUG_PRINT               88
++
++//Error codes of SBI_SM_ALLOC_ENCLAVE_MEM
++#define RETRY_SPIN_LOCK         		 -3
++#define ENCLAVE_NO_MEMORY                -2
++#define ENCLAVE_UNKNOWN_ERROR            -1
++#define ENCLAVE_SUCCESS                   0
++#define ENCLAVE_TIMER_IRQ                   1
++#define ENCLAVE_OCALL                   2
++
++#define RETURN_USER_EXIT_ENCL			0
++#define RETURN_USER_FOR_OCALL			1
++
++/* OCALL codes */
++#define OCALL_TIMER_IRQ                   2000
++#define OCALL_MEMORY_EXTEND            2001
++#define OCALL_MEMORY_FREE              2002
++#define OCALL_SYSCALL                  2003
++
++#define RESUME_FROM_SYSCALL               1
++#define RESUME_FROM_TIMER_IRQ          2000
++#define RESUME_FROM_MALLOC_PAGES       2001
++#define RESUME_FROM_FREE_PAGES         2002
++#define RESUME_FROM_STOP               2003
++#define RESUME_FROM_OCALL              2
++
++#define FLAG_DESTROY                      0
++#define DIRECT_DESTROY                    1
++#define FREE_MAX_MEMORY                   2
++#define FREE_SPEC_MEMORY                  3
++
++/* OCALL codes */
++#define OCALL_SYS_WRITE                   3
++#define OCALL_USER_DEFINED				  9
++
++#define PRE_EXTEND_MONITOR_MEMORY 1
++
++/*Abstract for enclave */
++typedef struct penglai_enclave
++{
++	unsigned int eid;	/* Allocated by secure monitor */
++	untrusted_mem_t* untrusted_mem;
++	enclave_mem_t* enclave_mem;
++	vaddr_t kbuffer;
++	unsigned long kbuffer_size;
++	unsigned long ocall_func_id;
++	unsigned long ocall_arg0;
++	unsigned long ocall_arg1;
++	unsigned long ocall_syscall_num;
++	int is_running; // A flag to indicate whether the enclave is in the running loop
++} enclave_t;
++
++typedef struct require_sec_memory
++{
++	unsigned long size;
++	unsigned long paddr;
++	unsigned long resp_size;
++} require_sec_memory_t;
++
++typedef struct reclaim_sec_memory
++{
++	unsigned long size;
++	unsigned long paddr;
++	unsigned long resp_size;
++} reclaim_sec_memory_t;
++
++enclave_t* create_enclave(int total_pages);
++int destroy_enclave(enclave_t* enclave);
++unsigned int enclave_idr_alloc(enclave_t* enclave);
++enclave_t* enclave_idr_remove(unsigned int ueid); 
++enclave_t* get_enclave_by_id(unsigned int ueid);
++
++#endif
+diff --git a/drivers/penglai-enclave/riscv64.h b/drivers/penglai-enclave/riscv64.h
+new file mode 100644
+index 000000000..1477ab33d
+--- /dev/null
++++ b/drivers/penglai-enclave/riscv64.h
+@@ -0,0 +1,60 @@
++#ifndef __RISCV64__
++#define __RISCV64__
++
++#include <asm/page.h>
++#include <linux/types.h>
++
++#define INSERT_FIELD(val, which, fieldval) (((val) & ~(which)) | ((fieldval) * ((which) & ~((which)-1))))
++
++#define PRV_U 0
++#define PRV_S 1
++#define PRV_H 2
++#define PRV_M 3
++
++#define SATP32_MODE 0x80000000
++#define SATP32_ASID 0x7FC00000
++#define SATP32_PPN  0x003FFFFF
++#define SATP64_MODE 0xF000000000000000
++#define SATP64_ASID 0x0FFFF00000000000
++#define SATP64_PPN  0x00000FFFFFFFFFFF
++
++#define SATP_MODE_OFF  0
++#define SATP_MODE_SV32 1
++#define SATP_MODE_SV39 8
++#define SATP_MODE_SV48 9
++#define SATP_MODE_SV57 10
++#define SATP_MODE_SV64 11
++
++/* page table entry (PTE) fields */
++#define PTE_V     0x001 // Valid
++#define PTE_R     0x002 // Read
++#define PTE_W     0x004 // Write
++#define PTE_X     0x008 // Execute
++#define PTE_U     0x010 // User
++#define PTE_G     0x020 // Global
++#define PTE_A     0x040 // Accessed
++#define PTE_D     0x080 // Dirty
++#define PTE_SOFT  0x300 // Reserved for Software
++
++#define PTE_PPN_SHIFT 10
++
++#define PTE_TABLE(PTE) (((PTE) & (PTE_V | PTE_R | PTE_W | PTE_X)) == PTE_V)
++
++#define MSTATUS_SD MSTATUS64_SD
++#define SSTATUS_SD SSTATUS64_SD
++#define RISCV_PGLEVEL_BITS 9
++
++#define RISCV_PGSHIFT 12
++#define RISCV_PGSIZE (1 << RISCV_PGSHIFT)
++
++#define MEGAPAGE_SIZE ((uintptr_t)(RISCV_PGSIZE << RISCV_PGLEVEL_BITS))
++#define SATP_MODE_CHOICE INSERT_FIELD(0, SATP64_MODE, SATP_MODE_SV39)
++#define VA_BITS 39
++#define GIGAPAGE_SIZE (MEGAPAGE_SIZE << RISCV_PGLEVEL_BITS)
++
++static inline void flush_tlb(void)
++{
++	asm volatile ("sfence.vma");
++}
++
++#endif
+diff --git a/drivers/penglai-enclave/syscall.h b/drivers/penglai-enclave/syscall.h
+new file mode 100644
+index 000000000..885c1a128
+--- /dev/null
++++ b/drivers/penglai-enclave/syscall.h
+@@ -0,0 +1,297 @@
++/*
++ * This file is a copy of Linux syscall number
++ *
++ * 	by Dong Du
++ * */
++
++#define SYS_io_setup 0
++#define SYS_io_destroy 1
++#define SYS_io_submit 2
++#define SYS_io_cancel 3
++#define SYS_io_getevents 4
++#define SYS_setxattr 5
++#define SYS_lsetxattr 6
++#define SYS_fsetxattr 7
++#define SYS_getxattr 8
++#define SYS_lgetxattr 9
++#define SYS_fgetxattr 10
++#define SYS_listxattr 11
++#define SYS_llistxattr 12
++#define SYS_flistxattr 13
++#define SYS_removexattr 14
++#define SYS_lremovexattr 15
++#define SYS_fremovexattr 16
++#define SYS_getcwd 17
++#define SYS_lookup_dcookie 18
++#define SYS_eventfd2 19
++#define SYS_epoll_create1 20
++#define SYS_epoll_ctl 21
++#define SYS_epoll_pwait 22
++#define SYS_dup 23
++#define SYS_dup3 24
++#define SYS_fcntl 25
++#define SYS_inotify_init1 26
++#define SYS_inotify_add_watch 27
++#define SYS_inotify_rm_watch 28
++#define SYS_ioctl 29
++#define SYS_ioprio_set 30
++#define SYS_ioprio_get 31
++#define SYS_flock 32
++#define SYS_mknodat 33
++#define SYS_mkdirat 34
++#define SYS_unlinkat 35
++#define SYS_symlinkat 36
++#define SYS_linkat 37
++#define SYS_umount2 39
++#define SYS_mount 40
++#define SYS_pivot_root 41
++#define SYS_nfsservctl 42
++#define SYS_statfs 43
++#define SYS_fstatfs 44
++#define SYS_truncate 45
++#define SYS_ftruncate 46
++#define SYS_fallocate 47
++#define SYS_faccessat 48
++#define SYS_chdir 49
++#define SYS_fchdir 50
++#define SYS_chroot 51
++#define SYS_fchmod 52
++#define SYS_fchmodat 53
++#define SYS_fchownat 54
++#define SYS_fchown 55
++#define SYS_openat 56
++#define SYS_close 57
++#define SYS_vhangup 58
++#define SYS_pipe2 59
++#define SYS_quotactl 60
++#define SYS_getdents64 61
++#define SYS_lseek 62
++#define SYS_read 63
++#define SYS_write 64
++#define SYS_readv 65
++#define SYS_writev 66
++#define SYS_pread64 67
++#define SYS_pwrite64 68
++#define SYS_preadv 69
++#define SYS_pwritev 70
++#define SYS_sendfile 71
++#define SYS_pselect6 72
++#define SYS_ppoll 73
++#define SYS_signalfd4 74
++#define SYS_vmsplice 75
++#define SYS_splice 76
++#define SYS_tee 77
++#define SYS_readlinkat 78
++#define SYS_fstatat 79
++#define SYS_fstat 80
++#define SYS_sync 81
++#define SYS_fsync 82
++#define SYS_fdatasync 83
++#define SYS_sync_file_range 84
++#define SYS_timerfd_create 85
++#define SYS_timerfd_settime 86
++#define SYS_timerfd_gettime 87
++#define SYS_utimensat 88
++#define SYS_acct 89
++#define SYS_capget 90
++#define SYS_capset 91
++#define SYS_personality 92
++#define SYS_exit 93
++#define SYS_exit_group 94
++#define SYS_waitid 95
++#define SYS_set_tid_address 96
++#define SYS_unshare 97
++#define SYS_futex 98
++#define SYS_set_robust_list 99
++#define SYS_get_robust_list 100
++#define SYS_nanosleep 101
++#define SYS_getitimer 102
++#define SYS_setitimer 103
++#define SYS_kexec_load 104
++#define SYS_init_module 105
++#define SYS_delete_module 106
++#define SYS_timer_create 107
++#define SYS_timer_gettime 108
++#define SYS_timer_getoverrun 109
++#define SYS_timer_settime 110
++#define SYS_timer_delete 111
++#define SYS_clock_settime 112
++#define SYS_clock_gettime 113
++#define SYS_clock_getres 114
++#define SYS_clock_nanosleep 115
++#define SYS_syslog 116
++#define SYS_ptrace 117
++#define SYS_sched_setparam 118
++#define SYS_sched_setscheduler 119
++#define SYS_sched_getscheduler 120
++#define SYS_sched_getparam 121
++#define SYS_sched_setaffinity 122
++#define SYS_sched_getaffinity 123
++#define SYS_sched_yield 124
++#define SYS_sched_get_priority_max 125
++#define SYS_sched_get_priority_min 126
++#define SYS_sched_rr_get_interval 127
++#define SYS_restart_syscall 128
++#define SYS_kill 129
++#define SYS_tkill 130
++#define SYS_tgkill 131
++#define SYS_sigaltstack 132
++#define SYS_rt_sigsuspend 133
++#define SYS_rt_sigaction 134
++#define SYS_rt_sigprocmask 135
++#define SYS_rt_sigpending 136
++#define SYS_rt_sigtimedwait 137
++#define SYS_rt_sigqueueinfo 138
++#define SYS_rt_sigreturn 139
++#define SYS_setpriority 140
++#define SYS_getpriority 141
++#define SYS_reboot 142
++#define SYS_setregid 143
++#define SYS_setgid 144
++#define SYS_setreuid 145
++#define SYS_setuid 146
++#define SYS_setresuid 147
++#define SYS_getresuid 148
++#define SYS_setresgid 149
++#define SYS_getresgid 150
++#define SYS_setfsuid 151
++#define SYS_setfsgid 152
++#define SYS_times 153
++#define SYS_setpgid 154
++#define SYS_getpgid 155
++#define SYS_getsid 156
++#define SYS_setsid 157
++#define SYS_getgroups 158
++#define SYS_setgroups 159
++#define SYS_uname 160
++#define SYS_sethostname 161
++#define SYS_setdomainname 162
++#define SYS_getrlimit 163
++#define SYS_setrlimit 164
++#define SYS_getrusage 165
++#define SYS_umask 166
++#define SYS_prctl 167
++#define SYS_getcpu 168
++#define SYS_gettimeofday 169
++#define SYS_settimeofday 170
++#define SYS_adjtimex 171
++#define SYS_getpid 172
++#define SYS_getppid 173
++#define SYS_getuid 174
++#define SYS_geteuid 175
++#define SYS_getgid 176
++#define SYS_getegid 177
++#define SYS_gettid 178
++#define SYS_sysinfo 179
++#define SYS_mq_open 180
++#define SYS_mq_unlink 181
++#define SYS_mq_timedsend 182
++#define SYS_mq_timedreceive 183
++#define SYS_mq_notify 184
++#define SYS_mq_getsetattr 185
++#define SYS_msgget 186
++#define SYS_msgctl 187
++#define SYS_msgrcv 188
++#define SYS_msgsnd 189
++#define SYS_semget 190
++#define SYS_semctl 191
++#define SYS_semtimedop 192
++#define SYS_semop 193
++#define SYS_shmget 194
++#define SYS_shmctl 195
++#define SYS_shmat 196
++#define SYS_shmdt 197
++#define SYS_socket 198
++#define SYS_socketpair 199
++#define SYS_bind 200
++#define SYS_listen 201
++#define SYS_accept 202
++#define SYS_connect 203
++#define SYS_getsockname 204
++#define SYS_getpeername 205
++#define SYS_sendto 206
++#define SYS_recvfrom 207
++#define SYS_setsockopt 208
++#define SYS_getsockopt 209
++#define SYS_shutdown 210
++#define SYS_sendmsg 211
++#define SYS_recvmsg 212
++#define SYS_readahead 213
++#define SYS_brk 214
++#define SYS_munmap 215
++#define SYS_mremap 216
++#define SYS_add_key 217
++#define SYS_request_key 218
++#define SYS_keyctl 219
++#define SYS_clone 220
++#define SYS_execve 221
++#define SYS_mmap 222
++#define SYS_fadvise64 223
++#define SYS_swapon 224
++#define SYS_swapoff 225
++#define SYS_mprotect 226
++#define SYS_msync 227
++#define SYS_mlock 228
++#define SYS_munlock 229
++#define SYS_mlockall 230
++#define SYS_munlockall 231
++#define SYS_mincore 232
++#define SYS_madvise 233
++#define SYS_remap_file_pages 234
++#define SYS_mbind 235
++#define SYS_get_mempolicy 236
++#define SYS_set_mempolicy 237
++#define SYS_migrate_pages 238
++#define SYS_move_pages 239
++#define SYS_rt_tgsigqueueinfo 240
++#define SYS_perf_event_open 241
++#define SYS_accept4 242
++#define SYS_recvmmsg 243
++#define SYS_arch_specific_syscall 244
++#define SYS_wait4 260
++#define SYS_prlimit64 261
++#define SYS_fanotify_init 262
++#define SYS_fanotify_mark 263
++#define SYS_name_to_handle_at 264
++#define SYS_open_by_handle_at 265
++#define SYS_clock_adjtime 266
++#define SYS_syncfs 267
++#define SYS_setns 268
++#define SYS_sendmmsg 269
++#define SYS_process_vm_readv 270
++#define SYS_process_vm_writev 271
++#define SYS_kcmp 272
++#define SYS_finit_module 273
++#define SYS_sched_setattr 274
++#define SYS_sched_getattr 275
++#define SYS_renameat2 276
++#define SYS_seccomp 277
++#define SYS_getrandom 278
++#define SYS_memfd_create 279
++#define SYS_bpf 280
++#define SYS_execveat 281
++#define SYS_userfaultfd 282
++#define SYS_membarrier 283
++#define SYS_mlock2 284
++#define SYS_copy_file_range 285
++#define SYS_preadv2 286
++#define SYS_pwritev2 287
++#define SYS_pkey_mprotect 288
++#define SYS_pkey_alloc 289
++#define SYS_pkey_free 290
++#define SYS_statx 291
++#define SYS_io_pgetevents 292
++#define SYS_rseq 293
++#define SYS_kexec_file_load 294
++#define SYS_pidfd_send_signal 424
++#define SYS_io_uring_setup 425
++#define SYS_io_uring_enter 426
++#define SYS_io_uring_register 427
++#define SYS_open_tree		428
++#define SYS_move_mount		429
++#define SYS_fsopen		430
++#define SYS_fsconfig		431
++#define SYS_fsmount		432
++#define SYS_fspick		433
++#define SYS_sysriscv __NR_arch_specific_syscall
++#define SYS_riscv_flush_icache (__NR_sysriscv + 15)
+-- 
+2.34.1
+
