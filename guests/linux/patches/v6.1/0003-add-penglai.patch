@@ -49,7 +49,7 @@ index 8c19d8ff4..2b853dfe3 100644
  
  source "drivers/bao/Kconfig"
 +
-+source "drivers/penglai-enclave"
++source "drivers/penglai-enclave/Kconfig"
  endmenu
 diff --git a/drivers/Makefile b/drivers/Makefile
 index f8fa362c3..4e7d8d011 100644
@@ -59,7 +59,7 @@ index f8fa362c3..4e7d8d011 100644
  obj-$(CONFIG_PECI)		+= peci/
  obj-$(CONFIG_HTE)		+= hte/
  obj-$(CONFIG_BAO_SHMEM)        += bao/
-+obj-$(CONFIG_PENGLAI_ENCLAVE)  += penglai-enclave/
++obj-y  += penglai-enclave/
 \ No newline at end of file
 diff --git a/drivers/penglai-enclave/.gitignore b/drivers/penglai-enclave/.gitignore
 new file mode 100644
@@ -102,7 +102,7 @@ index 000000000..e44538ccf
 +## Description:
 +## 	The file now assumes the kernel located in ../openeuler-kernel,
 +##	if you would like to use your own one, please change the path
-+obj-m += penglai.o
++obj-y += penglai.o
 +penglai-objs := penglai-enclave-driver.o \
 +	penglai-enclave-elfloader.o \
 +	penglai-enclave-page.o \
